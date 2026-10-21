@@ -78,12 +78,30 @@ jobs:
 
       - name: Install Platform Dependencies (contracts, starters)
         run: |
-          mvn -B -DskipTests install \
-            -pl platform/delivery-platform-bom,platform/delivery-build-parent,platform/kafka-starter,observability-starter,runtime-platform-starter,platform/platform-http-blocking,identity-contracts,search-contracts,routing-contracts,delivery-contracts,order-contracts,clients/identity-client,clients/routing-client,auth-resource-server-starter
+          if [ -d "platform/delivery-platform-bom" ]; then
+            mvn -B -DskipTests install \
+              -pl platform/delivery-platform-bom,platform/delivery-build-parent,platform/kafka-starter,observability-starter,runtime-platform-starter,platform/platform-http-blocking,identity-contracts,search-contracts,routing-contracts,delivery-contracts,order-contracts,clients/identity-client,clients/routing-client,auth-resource-server-starter
+          else
+            echo "Standalone repository detected. Installing core starters & contracts from GitHub..."
+            git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.starters.git /tmp/starters
+            mvn -B -DskipTests install -f /tmp/starters/pom.xml
+            git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.contracts.git /tmp/contracts
+            mvn -B -DskipTests install -f /tmp/contracts/pom.xml
+          fi
 
       - name: Package Service Jar
         run: |
-          bash scripts/package-compose-services.sh ${{ inputs.service_name }} ${{ inputs.extra_maven_args }}
+          if [ -f "scripts/package-compose-services.sh" ]; then
+            bash scripts/package-compose-services.sh ${{ inputs.service_name }} ${{ inputs.extra_maven_args }}
+          else
+            mvn -B -DskipTests clean package ${{ inputs.extra_maven_args }}
+            mkdir -p target
+            JAR_FILE=$(find . -type f \( -name "*boot*.jar" -o -name "*service*.jar" -o -name "*.jar" \) ! -name "*sources*" ! -name "*javadoc*" ! -name "*.jar.original" -path "*/target/*" | head -n 1)
+            if [ -n "$JAR_FILE" ]; then
+              echo "Found executable jar: $JAR_FILE -> copying to target/app.jar"
+              cp "$JAR_FILE" target/app.jar
+            fi
+          fi
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
