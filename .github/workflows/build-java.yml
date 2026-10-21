@@ -82,11 +82,15 @@ jobs:
             mvn -B -DskipTests install \
               -pl platform/delivery-platform-bom,platform/delivery-build-parent,platform/kafka-starter,observability-starter,runtime-platform-starter,platform/platform-http-blocking,identity-contracts,search-contracts,routing-contracts,delivery-contracts,order-contracts,clients/identity-client,clients/routing-client,auth-resource-server-starter
           else
-            echo "Standalone repository detected. Installing core starters & contracts from GitHub..."
+            echo "Standalone repository detected. Installing core BOM, build parent, contracts & starters..."
             git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.starters.git /tmp/starters
-            mvn -B -DskipTests install -f /tmp/starters/pom.xml
+            mvn -B -DskipTests install -f /tmp/starters/platform/delivery-platform-bom/pom.xml
+            mvn -B -DskipTests install -f /tmp/starters/platform/delivery-build-parent/pom.xml
+
             git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.contracts.git /tmp/contracts
             mvn -B -DskipTests install -f /tmp/contracts/pom.xml
+
+            mvn -B -DskipTests install -f /tmp/starters/pom.xml
           fi
 
       - name: Package Service Jar
