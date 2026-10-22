@@ -123,12 +123,15 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build & Push Docker Image
+        id: docker_build
         env:
           SERVICE: ${{ inputs.service_name }}
           TARGET_IMAGE: ${{ inputs.image_name || inputs.service_name }}
           IMAGE_TAG: ${{ github.sha }}
           PLATFORM: ${{ inputs.platform }}
           DOCKERFILE: ${{ inputs.dockerfile }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           canonical="${SERVICE%-service}"
           if [ "$SERVICE" = "saga-orchestrator-service" ]; then
@@ -145,12 +148,57 @@ jobs:
 
           IMAGE_URI="${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${TARGET_IMAGE}"
 
+          # Determine tags based on branch or release tag
+          TAG_ARGS=()
+          TARGET_ENV=""
+          DEPLOY_TAG=""
+
+          if [ "$REF_TYPE" = "tag" ] || [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "🏷️ Release tag detected: ${REF_NAME}"
+            TAG_ARGS+=("-t" "${IMAGE_URI}:${REF_NAME}")
+            TAG_ARGS+=("-t" "${IMAGE_URI}:latest")
+            TARGET_ENV="production"
+            DEPLOY_TAG="${REF_NAME}"
+          elif [ "$REF_NAME" = "staging" ]; then
+            echo "🧪 Staging branch build detected"
+            TAG_ARGS+=("-t" "${IMAGE_URI}:staging-${IMAGE_TAG}")
+            TAG_ARGS+=("-t" "${IMAGE_URI}:staging")
+            TARGET_ENV="staging"
+            DEPLOY_TAG="staging-${IMAGE_TAG}"
+          else
+            echo "📦 Main/Feature branch build detected"
+            TAG_ARGS+=("-t" "${IMAGE_URI}:${IMAGE_TAG}")
+            TAG_ARGS+=("-t" "${IMAGE_URI}:latest")
+            TARGET_ENV="staging"
+            DEPLOY_TAG="${IMAGE_TAG}"
+          fi
+
           docker buildx build \
             --platform "${PLATFORM}" \
             --build-arg SERVICE_PATH="${SERVICE_PATH}" \
-            -t "${IMAGE_URI}:${IMAGE_TAG}" \
-            -t "${IMAGE_URI}:latest" \
+            "${TAG_ARGS[@]}" \
             -f "${DOCKERFILE}" \
             --push .
 
-          echo "✅ Successfully built & pushed ${IMAGE_URI}:${IMAGE_TAG}"
+          echo "✅ Successfully built & pushed image with tags:"
+          for t in "${TAG_ARGS[@]}"; do
+            echo "   $t"
+          done
+
+          echo "target_env=${TARGET_ENV}" >> $GITHUB_OUTPUT
+          echo "deploy_tag=${DEPLOY_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Trigger GitOps CD Deployment
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/staging' || startsWith(github.ref, 'refs/tags/v'))
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_IMAGE: ${{ inputs.image_name || inputs.service_name }}
+          TARGET_ENV: ${{ steps.docker_build.outputs.target_env }}
+          DEPLOY_TAG: ${{ steps.docker_build.outputs.deploy_tag }}
+        run: |
+          echo "🚀 Dispatching GitOps deployment: ${TARGET_IMAGE} (${DEPLOY_TAG}) -> ${TARGET_ENV}"
+          curl -s -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            https://api.github.com/repos/hoanganhnth23/delivery.devops.gitops/dispatches \
+            -d "{\"event_type\": \"deploy_service\", \"client_payload\": {\"environment\": \"${TARGET_ENV}\", \"service_name\": \"${TARGET_IMAGE}\", \"image_tag\": \"${DEPLOY_TAG}\"}}" || echo "GitOps dispatch completed"
