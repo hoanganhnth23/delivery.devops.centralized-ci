@@ -61,8 +61,7 @@ jobs:
           fi
           echo "✅ Secret scan passed: No leaked credentials found."
 
-      - name: Authenticate to Google Cloud (for GAR Artifacts)
-        if: ${{ secrets.GCP_SA_KEY != '' }}
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
