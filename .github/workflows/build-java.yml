@@ -1,11 +1,14 @@
 # =============================================================================
-# Reusable CI Workflow: Java / Spring Boot Microservices
+# Centralized CI/CD Workflow: Java / Spring Boot Microservices
 # =============================================================================
-# Builds Maven project, packages service jar, builds Docker image (with platform support)
-# and pushes to Google Artifact Registry.
+# Architecture:
+# - Stage 1 (Quality Gate): Runs on Pull Request & Push.
+#   Performs Secret Scan, Lint & Compile, Unit & Integration Tests, Coverage.
+# - Stage 2 (Dockerize & Deploy): ONLY runs on Push (Merge) or Release Tag.
+#   Builds executable JAR, Docker image, pushes to GAR and triggers GKE GitOps.
 # =============================================================================
 
-name: "CI: Build Java Service"
+name: "Centralized CI/CD: Java Service"
 
 on:
   workflow_call:
@@ -49,6 +52,16 @@ on:
         required: false
         type: string
         default: ""
+      run_secret_scan:
+        description: "Run secret scanning"
+        required: false
+        type: boolean
+        default: true
+      run_tests:
+        description: "Run unit & integration tests"
+        required: false
+        type: boolean
+        default: true
     secrets:
       GCP_SA_KEY:
         required: true
@@ -59,8 +72,11 @@ env:
   REPOSITORY: delivery-repo
 
 jobs:
-  build-and-push:
-    name: "Dockerize ${{ inputs.image_name || inputs.service_name }}"
+  # ===========================================================================
+  # Stage 1: Quality Gate (Chạy khi tạo PR / MR & khi Push)
+  # ===========================================================================
+  quality-gate:
+    name: "Stage 1: Quality Gate (Security, Lint, Test, Coverage)"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source Code
@@ -76,22 +92,95 @@ jobs:
           java-version: ${{ inputs.java_version }}
           cache: maven
 
+      - name: Secret Scan (Credential & Key Detection)
+        if: inputs.run_secret_scan
+        run: |
+          echo "🔍 Scanning commit for hardcoded secrets, API keys, and private credentials..."
+          SUSPICIOUS=$(git grep -EI '(AIza[0-9A-Za-z-_]{35}|ghp_[0-9A-Za-z]{36}|-----BEGIN (RSA|EC|DSA|OPENSSH|PRIVATE) KEY-----)' -- ':!*.lock' ':!pom.xml' ':!target' || true)
+          if [ -n "$SUSPICIOUS" ]; then
+            echo "❌ Suspicious secret pattern detected in repository:"
+            echo "$SUSPICIOUS"
+            exit 1
+          fi
+          echo "✅ Secret scan passed: No leaked credentials found."
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
       - name: Install Platform Dependencies (contracts, starters)
         run: |
-          if [ -d "platform/delivery-platform-bom" ]; then
-            mvn -B -DskipTests install \
-              -pl platform/delivery-platform-bom,platform/delivery-build-parent,platform/kafka-starter,observability-starter,runtime-platform-starter,platform/platform-http-blocking,identity-contracts,search-contracts,routing-contracts,delivery-contracts,order-contracts,clients/identity-client,clients/routing-client,auth-resource-server-starter
-          else
-            echo "Standalone repository detected. Installing core BOM, build parent, contracts & starters..."
-            git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.starters.git /tmp/starters
-            mvn -B -DskipTests install -f /tmp/starters/platform/delivery-platform-bom/pom.xml
-            mvn -B -DskipTests install -f /tmp/starters/platform/delivery-build-parent/pom.xml
+          echo "Resolving platform dependencies (BOM, build-parent, contracts, starters)..."
+          git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.starters.git /tmp/starters
+          mvn -B -DskipTests install -f /tmp/starters/platform/delivery-platform-bom/pom.xml
+          mvn -B -DskipTests install -f /tmp/starters/platform/delivery-build-parent/pom.xml
 
-            git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.contracts.git /tmp/contracts
-            mvn -B -DskipTests install -f /tmp/contracts/pom.xml
+          git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.contracts.git /tmp/contracts
+          mvn -B -DskipTests install -f /tmp/contracts/pom.xml
 
-            mvn -B -DskipTests install -f /tmp/starters/pom.xml
-          fi
+          mvn -B -DskipTests install -f /tmp/starters/pom.xml
+          echo "✅ Platform dependencies ready."
+
+      - name: Compile and Lint Check
+        run: |
+          echo "🛠️ Compiling all source modules and test classes..."
+          mvn -B test-compile
+
+      - name: Run Unit & Integration Tests
+        if: inputs.run_tests
+        run: |
+          echo "🧪 Running unit & integration tests..."
+          mvn -B test -DfailIfNoTests=false
+
+      - name: Upload Test & Coverage Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.service_name || 'service' }}-test-reports
+          path: |
+            **/target/surefire-reports/**
+            **/target/site/jacoco/**
+            **/target/jacoco.exec
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # Stage 2: Dockerize & Deploy (CHỈ CHẠY KHI MERGE VÀO NHÁNH HOẶC TẠO TAG)
+  # ===========================================================================
+  dockerize-and-deploy:
+    name: "Stage 2: Post-Merge (Build JAR, Push GAR & Deploy GKE)"
+    needs: [quality-gate]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.checkout_repo || github.repository }}
+          ref: ${{ inputs.checkout_ref || github.ref }}
+
+      - name: Set up JDK ${{ inputs.java_version }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: maven
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Install Platform Dependencies
+        run: |
+          git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.starters.git /tmp/starters
+          mvn -B -DskipTests install -f /tmp/starters/platform/delivery-platform-bom/pom.xml
+          mvn -B -DskipTests install -f /tmp/starters/platform/delivery-build-parent/pom.xml
+
+          git clone --depth=1 https://github.com/hoanganhnth23/delivery.core.contracts.git /tmp/contracts
+          mvn -B -DskipTests install -f /tmp/contracts/pom.xml
+
+          mvn -B -DskipTests install -f /tmp/starters/pom.xml
 
       - name: Package Service Jar
         run: |
@@ -106,11 +195,6 @@ jobs:
               cp "$JAR_FILE" target/app.jar
             fi
           fi
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
