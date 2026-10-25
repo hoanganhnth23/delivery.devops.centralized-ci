@@ -189,11 +189,23 @@ jobs:
           else
             mvn -B -DskipTests clean package ${{ inputs.extra_maven_args }}
             mkdir -p target
-            JAR_FILE=$(find . -type f \( -name "*boot*.jar" -o -name "*service*.jar" -o -name "*.jar" \) ! -name "*sources*" ! -name "*javadoc*" ! -name "*.jar.original" -path "*/target/*" | head -n 1)
-            if [ -n "$JAR_FILE" ]; then
-              echo "Found executable jar: $JAR_FILE -> copying to target/app.jar"
-              cp "$JAR_FILE" target/app.jar
+            # Multi-module repos build several jars (domain, application, ...); only the
+            # Spring Boot repackaged one has Start-Class in its manifest. Picking the first
+            # jar found shipped library jars ("no main manifest attribute, in app.jar").
+            JAR_FILE=""
+            for j in $(find . -type f -path "*/target/*.jar" ! -path "./target/app.jar" ! -name "*sources*" ! -name "*javadoc*" ! -name "*-plain.jar"); do
+              if unzip -p "$j" META-INF/MANIFEST.MF 2>/dev/null | grep -q "^Start-Class:"; then
+                JAR_FILE="$j"
+                break
+              fi
+            done
+            if [ -z "$JAR_FILE" ]; then
+              echo "::error::No Spring Boot executable jar (Start-Class) found under */target/"
+              find . -type f -path "*/target/*.jar"
+              exit 1
             fi
+            echo "Found executable jar: $JAR_FILE -> copying to target/app.jar"
+            cp "$JAR_FILE" target/app.jar
           fi
 
       - name: Set up Cloud SDK
