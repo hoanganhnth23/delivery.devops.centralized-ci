@@ -69,6 +69,18 @@ jobs:
     name: "Build Flutter (${{ inputs.build_target }})"
     runs-on: ${{ inputs.build_target == 'ios' && 'macos-latest' || 'ubuntu-latest' }}
     steps:
+      - name: Free Disk Space (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          echo "Disk space before cleanup:"
+          df -h
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android/sdk/ndk*
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          echo "Disk space after cleanup:"
+          df -h
+
       - name: Checkout Source Code
         uses: actions/checkout@v4
         with:
